@@ -1,0 +1,146 @@
+// 5c.js — Phong + TWO point lights (Babylon.js ShaderMaterial)
+
+var createScene = function () {
+  var scene = new BABYLON.Scene(engine);
+
+  // Camera & basic meshes
+  var camera = new BABYLON.FreeCamera("camera1", new BABYLON.Vector3(0, 5, -10), scene);
+  camera.setTarget(BABYLON.Vector3.Zero());
+  camera.attachControl(canvas, true);
+
+  var sphere = BABYLON.MeshBuilder.CreateSphere("sphere", { diameter: 2, segments: 32 }, scene);
+  sphere.position.y = 1;
+  sphere.position.x = 1;
+
+  var cylinder = BABYLON.MeshBuilder.CreateCylinder("cylinder", { height: 2, diameter: 1 }, scene);
+  cylinder.position.y = 1;
+  cylinder.position.x = -1;
+
+  // ---------------- Vertex shader ----------------
+  BABYLON.Effect.ShadersStore["customVertexShader"] = `
+    precision highp float;
+
+    attribute vec3 position;
+    attribute vec3 normal;
+
+    uniform mat4 world;
+    uniform mat4 worldViewProjection;
+
+    varying vec3 vPosW;
+    varying vec3 vNormalW;
+
+    void main() {
+      vec4 pw = world * vec4(position, 1.0);
+      vPosW = pw.xyz;
+      vNormalW = normalize(mat3(world) * normal);
+      gl_Position = worldViewProjection * vec4(position, 1.0);
+    }
+  `;
+
+  // ---------------- Fragment shader ----------------
+  BABYLON.Effect.ShadersStore["customFragmentShader"] = `
+    precision highp float;
+
+    varying vec3 vPosW;
+    varying vec3 vNormalW;
+
+    // Material
+    uniform float uMatAmbient;
+    uniform vec3  uMatDiffuse;
+    uniform vec3  uMatSpecular;
+    uniform float uMatShininess;
+
+    // Camera
+    uniform vec3 uCameraPos;
+
+    // Point light #1
+    uniform vec3 uPointLightColor;
+    uniform vec3 uPointLightPos;
+
+    // Point light #2 (NEW for part c)
+    uniform vec3 uPointLight2Color;
+    uniform vec3 uPointLight2Pos;
+
+    vec3 shadePointLight(
+      vec3 lColor, vec3 lPos, vec3 N, vec3 V, vec3 kd, vec3 ks, float shin)
+    {
+      // Direction & distance to light
+      vec3 Lvec = lPos - vPosW;
+      float dist = length(Lvec);
+      vec3  L    = normalize(Lvec);
+
+      // Distance attenuation (tweakable)
+      float att = 1.0 / (1.0 + 0.14 * dist + 0.07 * dist * dist);
+
+      // Diffuse
+      float ndotl = max(dot(N, L), 0.0);
+      vec3 diffuse = kd * lColor * ndotl;
+
+      // Specular (Phong)
+      vec3  R = reflect(-L, N);
+      float rdotv = max(dot(R, V), 0.0);
+      vec3  specular = ks * lColor * pow(rdotv, shin);
+
+      // No specular if light behind the surface
+      specular *= step(0.0, ndotl);
+
+      return att * (diffuse + specular);
+    }
+
+    void main() {
+      vec3 N = normalize(vNormalW);
+      vec3 V = normalize(uCameraPos - vPosW);
+
+      // Ambient term
+      vec3 color = uMatAmbient * uMatDiffuse;
+
+      // Light #1
+      color += shadePointLight(
+        uPointLightColor, uPointLightPos,
+        N, V, uMatDiffuse, uMatSpecular, uMatShininess);
+
+      // Light #2 (NEW)
+      color += shadePointLight(
+        uPointLight2Color, uPointLight2Pos,
+        N, V, uMatDiffuse, uMatSpecular, uMatShininess);
+
+      gl_FragColor = vec4(color, 1.0);
+    }
+  `;
+
+  // Shader material
+  var shaderMat = new BABYLON.ShaderMaterial("custom", scene, "custom", {
+    attributes: ["position", "normal"],
+    uniforms: [
+      "world", "worldViewProjection",
+      "uCameraPos",
+      "uMatAmbient", "uMatDiffuse", "uMatSpecular", "uMatShininess",
+      "uPointLightColor", "uPointLightPos",
+      "uPointLight2Color", "uPointLight2Pos"  // NEW
+    ]
+  });
+
+  // ----------- Material parameters -----------
+  shaderMat.setFloat("uMatAmbient", 0.20);
+  shaderMat.setColor3("uMatDiffuse",  new BABYLON.Color3(0.45, 0.15, 0.15)); // deep red
+  shaderMat.setColor3("uMatSpecular", new BABYLON.Color3(1.0, 1.0, 1.0));
+  shaderMat.setFloat("uMatShininess", 64.0);
+
+  // ----------- Point light #1 (warm key) -----------
+  shaderMat.setColor3("uPointLightColor", new BABYLON.Color3(1.00, 0.55, 0.35));
+  shaderMat.setVector3("uPointLightPos",  new BABYLON.Vector3( 2.2, 3.0, -2.0));
+
+  // ----------- Point light #2 (cool rim) -----------
+  shaderMat.setColor3("uPointLight2Color", new BABYLON.Color3(0.55, 0.65, 1.00));
+  shaderMat.setVector3("uPointLight2Pos",  new BABYLON.Vector3(-3.0, 2.2,  1.0));
+
+  // Keep camera position updated
+  scene.onBeforeRenderObservable.add(function () {
+    shaderMat.setVector3("uCameraPos", camera.position);
+  });
+
+  sphere.material = shaderMat;
+  cylinder.material = shaderMat;
+
+  return scene;
+};
