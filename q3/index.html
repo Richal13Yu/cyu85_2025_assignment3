@@ -64,78 +64,202 @@
         var sceneToRender = null;
         var createDefaultEngine = function() { return new BABYLON.Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true,  disableWebGL2Support: false}); };
         var createScene = async function () {
-    const scene = new BABYLON.Scene(engine);
-    new BABYLON.HemisphericLight("lite", new BABYLON.Vector3(0, 1, 0), scene).intensity = 0.6;
-    const container = await BABYLON.SceneLoader.LoadAssetContainerAsync("", "blue_crab.glb", scene);
-    const pikachu = container.createRootMesh();   
-    container.addAllToScene();
-    pikachu.setEnabled(false);
-    pikachu.scaling = new BABYLON.Vector3(0.5, 0.5, 0.5);
 
-    const xr = await BABYLON.WebXRDefaultExperience.CreateAsync(scene, {
-        uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local" },
+    var scene = new BABYLON.Scene(engine);
+    var camera = new BABYLON.FreeCamera("camera1", new BABYLON.Vector3(0, 1, -5), scene);
+    camera.setTarget(BABYLON.Vector3.Zero());
+    camera.attachControl(canvas, true);
+
+    const arAvailable = await BABYLON.WebXRSessionManager.IsSessionSupportedAsync('immersive-ar');
+
+    const advancedTexture = BABYLON.GUI.AdvancedDynamicTexture.CreateFullscreenUI("FullscreenUI");
+    const rectangle = new BABYLON.GUI.Rectangle("rect");
+    rectangle.background = "black";
+    rectangle.color = "blue";
+    rectangle.width = "80%";
+    rectangle.height = "50%";
+    advancedTexture.addControl(rectangle);
+    const nonXRPanel = new BABYLON.GUI.StackPanel();
+    rectangle.addControl(nonXRPanel);
+
+    const text1 = new BABYLON.GUI.TextBlock("text1");
+    text1.fontFamily = "Helvetica";
+    text1.textWrapping = true;
+    text1.color = "white";
+    text1.fontSize = "14px";
+    text1.height = "400px"
+    text1.paddingLeft = "10px";
+    text1.paddingRight = "10px";
+ 
+    if (!arAvailable) {
+        text1.text = "AR is not available in your system. Please make sure you use a supported device such as a Meta Quest 3 or a modern Android device and a supported browser like Chrome.\n \n Make sure you have Google AR services installed and that you enabled the WebXR incubation flag under chrome://flags";
+        nonXRPanel.addControl(text1);
+        return scene;
+    } else {
+        text1.text = "WebXR Demo: Hit test and depth sensing.\n \n Please enter AR with the button on the lower right corner to start. Once in AR, look at the floor for a few seconds (and move a little): the hit-testing ring will appear. Then click anywhere on the screen to place a model in your space.";
+        nonXRPanel.addControl(text1);
+    }
+
+    var light = new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
+    light.intensity = 0.7;
+
+    var dirLight = new BABYLON.DirectionalLight('dir', new BABYLON.Vector3(0, -1, -0.5), scene);
+    dirLight.position = new BABYLON.Vector3(0, 5, -5);
+
+    var shadowGenerator = new BABYLON.ShadowGenerator(1024, dirLight);
+    shadowGenerator.useBlurExponentialShadowMap = true;
+    shadowGenerator.blurKernel = 32;
+
+    const model = await BABYLON.SceneLoader.ImportMeshAsync("", "./", "blue_crab.glb", scene);
+    const crab = model.meshes[0];
+    crab.rotationQuaternion = new BABYLON.Quaternion();
+    crab.isVisible = false;
+    crab.scaling = new BABYLON.Vector3(0.02, 0.02, 0.02);
+    shadowGenerator.addShadowCaster(crab, true);
+
+    const hl = new BABYLON.HighlightLayer("hl1", scene);
+
+    const xr = await scene.createDefaultXRExperienceAsync({
+        uiOptions: { sessionMode: 'immersive-ar' },
         optionalFeatures: true
     });
+
+    xr.baseExperience.sessionManager.onXRSessionInit.add(() => { rectangle.isVisible = false; });
+    xr.baseExperience.sessionManager.onXRSessionEnded.add(() => { rectangle.isVisible = true; });
+
+    xr.baseExperience.featuresManager.enableFeature(
+        BABYLON.WebXRFeatureName.DEPTH_SENSING,
+        "latest",
+        { dataFormatPreference: ["ushort", "float"], usagePreference: ["cpu", "gpu"] }
+    );
+
     const fm = xr.baseExperience.featuresManager;
-    const hitTest = fm.enableFeature(BABYLON.WebXRFeatureName.HIT_TEST, "latest", {
-        offsetRay: new BABYLON.Ray(new BABYLON.Vector3(0, 0, 0), new BABYLON.Vector3(0, 0, -1)),
-        entityTypes: ["plane"]
-    });
+    fm.enableFeature(BABYLON.WebXRBackgroundRemover.Name);
 
-    let lastHit = null;           
-    hitTest.onHitTestResultObservable.add(results => {
-        if (results.length > 0) {
-            lastHit = results[0];
-        } else {
-            lastHit = null;
-        }
-    });
+    const marker = BABYLON.MeshBuilder.CreateTorus('marker', { diameter: 0.15, thickness: 0.05 });
+    marker.isVisible = false;
+    marker.rotationQuaternion = new BABYLON.Quaternion();
 
-    let selected = null;             
-    xr.input.onControllerAddedObservable.add(xrController => {
-        if (xrController.inputSource.handedness !== "right") {
-            return;
-        }
+    let hitTestSource = null;
+    let currentResult = null;
+    let CrabList = [];
+    let selectedModel = null;
 
-        xrController.onMotionControllerInitObservable.add(mc => {
-        const trigger = mc.getComponent("xr-standard-trigger");
-        trigger.onButtonStateChangedObservable.add(() => {
-            if (trigger.pressed && lastHit) {
-            const clone = pikachu.clone("spawn_" + Date.now());
-            clone.setEnabled(true);
-            clone.position.copyFrom(lastHit.position);
-            const fwd = xr.baseExperience.camera.getForwardRay().direction;
-            clone.rotationQuaternion = BABYLON.Quaternion.FromLookDirectionLH(
-                new BABYLON.Vector3(fwd.x, 0, fwd.z).normalize(),
-                BABYLON.Axis.Y
-            );
-            selected = clone; 
+    xr.input.onControllerAddedObservable.add(async (controller) => {
+        controller.onMotionControllerInitObservable.add((motionController) => {
+            if (motionController.handedness !== 'right') return;
+
+            const session = xr.baseExperience.sessionManager.session;
+            const referenceSpace = xr.baseExperience.sessionManager.referenceSpace;
+
+            session.requestHitTestSource({ space: controller.inputSource.targetRaySpace }).then((source) => {
+                hitTestSource = source;
+            });
+
+            xr.baseExperience.sessionManager.onXRFrameObservable.add((xrFrame) => {
+                if (!hitTestSource) return;
+                const results = xrFrame.getHitTestResults(hitTestSource);
+                const result = results[0] || null;
+                currentResult = result;
+
+                if (results.length) {
+                    marker.isVisible = true;
+                    const pose = result.getPose(referenceSpace);
+                    const p = pose.transform.position;
+                    const q = pose.transform.orientation;
+                    marker.position.set(p.x, p.y, -p.z);
+                    marker.rotationQuaternion.set(q.x, q.y, q.z, q.w);
+                } else {
+                    marker.isVisible = false;
+                }
+            });
+
+            const rightTrigger = motionController.getComponent("xr-standard-trigger");
+            if (rightTrigger) {
+                rightTrigger.onButtonStateChangedObservable.add(() => {
+                    if (!rightTrigger.pressed) return;
+                    if (!currentResult || !marker.isVisible || !xr.baseExperience.sessionManager.inXRSession) return;
+
+                    const pose = currentResult.getPose(referenceSpace);
+                    if (!pose) return;
+
+                    const newCrab = crab.clone("crab_" + Date.now());
+                    newCrab.isVisible = true;
+
+                    const p = pose.transform.position;
+                    const q = pose.transform.orientation;
+
+                    const bbox = newCrab.getBoundingInfo().boundingBox;
+                    const heightOffset = (bbox.maximum.y - bbox.minimum.y) * newCrab.scaling.y;
+
+                    newCrab.position.set(p.x, p.y + heightOffset * 0.5 + 0.01, -p.z);
+                    newCrab.rotationQuaternion.set(q.x, q.y, q.z, q.w);
+
+                    shadowGenerator.addShadowCaster(newCrab, true);
+                    CrabList.push(newCrab);
+                    selectedModel = newCrab;
+                });
+            }
+
+            const rightSqueeze = motionController.getComponent("xr-standard-squeeze");
+            if (rightSqueeze) {
+                rightSqueeze.onButtonStateChangedObservable.add(() => {
+                    if (!rightSqueeze.pressed) return;
+
+                    const ray = controller.getForwardRay(10.0);
+                    const pickInfo = scene.pickWithRay(ray, (mesh) => {
+                        return CrabList.some(root => mesh === root || mesh.isDescendantOf && mesh.isDescendantOf(root));
+                    });
+
+                    if (pickInfo.hit && pickInfo.pickedMesh) {
+                        if (selectedModel) hl.removeMesh(selectedModel);
+                        selectedModel = CrabList.find(root => pickInfo.pickedMesh === root || (pickInfo.pickedMesh.isDescendantOf && pickInfo.pickedMesh.isDescendantOf(root))) || null;
+                        if (selectedModel) hl.addMesh(selectedModel, BABYLON.Color3.White());
+                    } else {
+                        if (selectedModel) hl.removeMesh(selectedModel);
+                        selectedModel = null;
+                    }
+                });
+            }
+
+            const rightThumbstick = motionController.getComponent("xr-standard-thumbstick");
+            if (rightThumbstick) {
+                rightThumbstick.onAxisValueChangedObservable.add((axes) => {
+                    if (!selectedModel) return;
+
+                    const movementSpeed = 0.05;
+                    const camRotQ = xr.baseExperience.camera.rotationQuaternion || BABYLON.Quaternion.Identity();
+
+                    const forward = new BABYLON.Vector3(0, 0, 1);
+                    const right = new BABYLON.Vector3(1, 0, 0);
+
+                    const rotatedForward = forward.rotateByQuaternionToRef(camRotQ, new BABYLON.Vector3());
+                    const rotatedRight = right.rotateByQuaternionToRef(camRotQ, new BABYLON.Vector3());
+                    rotatedForward.y = 0;
+                    rotatedRight.y = 0;
+                    rotatedForward.normalize();
+                    rotatedRight.normalize();
+
+                    const move = rotatedRight.scale(axes.x * movementSpeed).add(rotatedForward.scale(-axes.y * movementSpeed));
+                    selectedModel.position.addInPlace(move);
+                });
             }
         });
-        });
-  });
+    });
 
-    const speed = 0.5; 
-    scene.onBeforeRenderObservable.add(() => {
-        if (!selected) {
-            return;            
+    xr.baseExperience.sessionManager.onXRSessionEnded.add(() => {
+        if (hitTestSource) {
+            hitTestSource.cancel();
+            hitTestSource = null;
         }
-        const right = xr.input.controllers.find(c => c.inputSource.handedness === "right");
-        const stick = right.motionController.getComponent("xr-standard-thumbstick");
-        const dt = scene.getEngine().getDeltaTime() / 1000;
-        const view = xr.baseExperience.camera;
-        const front_view = view.getForwardRay().direction;
-        const forward_pikachu = new BABYLON.Vector3(front_view.x, 0, front_view.z).normalize();
-        const right_pikachu = BABYLON.Vector3.Cross(forward_pikachu, BABYLON.Axis.Y).negate().normalize();
-
-        const move = right_pikachu.scale(stick.axes.x * speed * dt)
-            .add(forward_pikachu.scale(stick.axes.y * speed * dt));
-        selected.position.addInPlace(move); 
+        if (selectedModel) {
+            hl.removeMesh(selectedModel);
+            selectedModel = null;
+        }
     });
 
     return scene;
 };
-
                 window.initFunction = async function() {
                     
                     
